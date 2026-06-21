@@ -94,10 +94,11 @@ def post_discord(d):
             {"name": "CA", "value": f"`{ca}`", "inline": False},
             {"name": "Liens", "value": f"[gmgn](https://gmgn.ai/sol/token/{ca}) | [vortex]({SITE}/token/{ca})", "inline": False},
         ],
-        "timestamp": __import__("datetime").datetime.utcfromtimestamp(d["date"]/1000).isoformat() + "Z"}]}
+        "timestamp": __import__("datetime").datetime.fromtimestamp(d["date"]/1000, __import__("datetime").timezone.utc).isoformat()}]}
     try:
         req = urllib.request.Request(DISCORD, data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"}, method="POST")
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": "Mozilla/5.0 (compatible; VortexMonitor/1.0)"}, method="POST")
         urllib.request.urlopen(req, timeout=20)
     except Exception as e:
         log("discord err", e)
