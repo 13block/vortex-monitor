@@ -6,7 +6,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------- Config (variables d'environnement) ----------
 PORT         = int(os.environ.get("PORT", "8080"))
-DISCORD      = os.environ.get("DISCORD_WEBHOOK", "").strip().strip("'\"").strip()
+DISCORD_RAW  = os.environ.get("DISCORD_WEBHOOK", "")
+WEBHOOKS     = [w.strip().strip("'\"").strip() for w in re.split(r"[,\s]+", DISCORD_RAW) if w.strip()]
+WEBHOOKS     = [w for w in WEBHOOKS if w.startswith("http")]
 POLL_MIN     = int(os.environ.get("POLL_MIN", "600"))      # delai mini (s) -> 600 = 10 min
 POLL_JITTER  = int(os.environ.get("POLL_JITTER", "300"))   # alea (s)       -> +0..300 = jusqu'a 15 min
 DATA_DIR     = os.environ.get("DATA_DIR", "/data")
@@ -80,7 +82,7 @@ def scrape_token(ca):
             "benef": round(sell - buy, 3), "wallets": int(num(mw.group(1))) if mw else 0}
 
 def post_discord(d):
-    if not DISCORD.startswith("http"): return
+    if not WEBHOOKS: return
     color = 0x3ddc84 if d["benef"] > 0 else (0xff5c5c if d["benef"] < 0 else 0x8b94a7)
     ca = d["ca"]
     payload = {"username": "Vortex Monitor", "embeds": [{
@@ -95,13 +97,15 @@ def post_discord(d):
             {"name": "Liens", "value": f"[gmgn](https://gmgn.ai/sol/token/{ca}) | [vortex]({SITE}/token/{ca})", "inline": False},
         ],
         "timestamp": __import__("datetime").datetime.fromtimestamp(d["date"]/1000, __import__("datetime").timezone.utc).isoformat()}]}
-    try:
-        req = urllib.request.Request(DISCORD, data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json",
-                                              "User-Agent": "Mozilla/5.0 (compatible; VortexMonitor/1.0)"}, method="POST")
-        urllib.request.urlopen(req, timeout=20)
-    except Exception as e:
-        log("discord err", e)
+    data = json.dumps(payload).encode()
+    for wh in WEBHOOKS:
+        try:
+            req = urllib.request.Request(wh, data=data,
+                                         headers={"Content-Type": "application/json",
+                                                  "User-Agent": "Mozilla/5.0 (compatible; VortexMonitor/1.0)"}, method="POST")
+            urllib.request.urlopen(req, timeout=20)
+        except Exception as e:
+            log("discord err", e)
 
 def load_state():
     global RECORDS, BASELINE_DONE
