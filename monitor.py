@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------- Config (variables d'environnement) ----------
 PORT         = int(os.environ.get("PORT", "8080"))
-DISCORD      = os.environ.get("DISCORD_WEBHOOK", "").strip()
+DISCORD      = os.environ.get("DISCORD_WEBHOOK", "").strip().strip("'\"").strip()
 POLL_MIN     = int(os.environ.get("POLL_MIN", "600"))      # delai mini (s) -> 600 = 10 min
 POLL_JITTER  = int(os.environ.get("POLL_JITTER", "300"))   # alea (s)       -> +0..300 = jusqu'a 15 min
 DATA_DIR     = os.environ.get("DATA_DIR", "/data")
