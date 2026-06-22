@@ -13,6 +13,8 @@ POLL_MIN     = int(os.environ.get("POLL_MIN", "600"))      # delai mini (s) -> 6
 POLL_JITTER  = int(os.environ.get("POLL_JITTER", "300"))   # alea (s)       -> +0..300 = jusqu'a 15 min
 DATA_DIR     = os.environ.get("DATA_DIR", "/data")
 PROXY        = os.environ.get("PROXY", "").strip()         # ex: http://user:pass@host:port (optionnel)
+REFRESH_HOURS = int(os.environ.get("REFRESH_HOURS", "24")) # re-scrape les tokens plus jeunes que X h (0 = jamais)
+REFRESH_MAX   = int(os.environ.get("REFRESH_MAX", "60"))   # nb max de tokens rafraichis par cycle
 SITE         = "https://www.vortexdeployer.com"
 
 STATE = os.path.join(DATA_DIR, "records.json")
@@ -139,7 +141,30 @@ def poll_once():
     if not BASELINE_DONE:
         BASELINE_DONE = True
         log("baseline etablie (silencieuse):", len(RECORDS))
+    refresh_recent()
     LAST_CHECK = int(time.time() * 1000)
+
+def refresh_recent():
+    # Re-scrape les tokens recents dont les stats peuvent encore bouger (sans re-ping Discord).
+    if REFRESH_HOURS <= 0: return
+    cutoff = (time.time() - REFRESH_HOURS * 3600) * 1000
+    with LOCK:
+        recent = [r["ca"] for r in RECORDS.values() if r.get("date", 0) >= cutoff][:REFRESH_MAX]
+    upd = 0
+    for ca in recent:
+        d = scrape_token(ca)
+        if not d: continue
+        with LOCK:
+            old = RECORDS.get(ca, {})
+            d["date"] = old.get("date", d["date"])           # garde la date d'origine
+            if old.get("sym") and old["sym"] != "?":         # garde sym/name d'origine si valides
+                d["sym"] = old["sym"]; d["name"] = old.get("name", d["name"])
+            if d != old:
+                RECORDS[ca] = d; upd += 1
+        time.sleep(0.3)
+    if upd:
+        with LOCK: save_state()
+        log(f"refresh: {upd}/{len(recent)} tokens MAJ")
 
 def poller():
     while True:
