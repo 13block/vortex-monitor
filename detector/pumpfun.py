@@ -1,11 +1,11 @@
-def craft_cursor(slot: int, ts_ms: int) -> str:
-    """Cursor for swap-api.pump.fun/v2 trades: 12-digit slot + 10-digit index + -ts_ms."""
-    return f"{slot:012d}0000000000-{ts_ms}"
-
 import json
 import time
 import urllib.request
 import urllib.error
+
+def craft_cursor(slot: int, ts_ms: int) -> str:
+    """Cursor for swap-api.pump.fun/v2 trades: 12-digit slot + 10-digit index + -ts_ms."""
+    return f"{slot:012d}0000000000-{ts_ms}"
 
 COINS_URL = "https://frontend-api-v3.pump.fun/coins/{mint}"
 TRADES_URL = "https://swap-api.pump.fun/v2/coins/{mint}/trades?limit={limit}"
@@ -39,7 +39,7 @@ class PumpFun:
         return self._get(url)
 
 def is_vortex(coins_json):
-    return "vortexdeployer.com" in (coins_json or {}).get("metadata_uri", "")
+    return "vortexdeployer.com" in ((coins_json or {}).get("metadata_uri") or "")
 
 def launch_slot(helius, mint, cap=90):
     before = None

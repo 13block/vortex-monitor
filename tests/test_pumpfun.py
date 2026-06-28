@@ -26,6 +26,7 @@ class TestVortexAndLaunch(unittest.TestCase):
     def test_is_vortex_false(self):
         self.assertFalse(is_vortex({"metadata_uri": "https://ipfs.io/x"}))
         self.assertFalse(is_vortex({}))
+        self.assertFalse(is_vortex({"metadata_uri": None}))
 
     def test_launch_slot_exact_when_short_page(self):
         # one page < 1000 entries -> oldest reached; slot = last entry's slot
@@ -38,6 +39,7 @@ class TestVortexAndLaunch(unittest.TestCase):
         full = [{"slot": s, "signature": str(s)} for s in range(1000, 0, -1)]
         pages = [full, full]  # always full -> never reaches end
         slot, exact = launch_slot(FakeHelius(pages), "MINT", cap=2)
+        self.assertIsNotNone(slot)
         self.assertFalse(exact)
 
 if __name__ == "__main__":
