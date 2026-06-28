@@ -31,6 +31,7 @@ class TestClassifier(unittest.TestCase):
         v = score_wallet(feats(traded=False, buy_sol=0.0, sell_sol=0.0), never_mega)
         self.assertEqual(v.dev_score, 0.0)
         self.assertFalse(v.is_dev)
+        self.assertEqual(v.reasons, [])
 
     def test_mega_funder_does_not_count_as_clean_funding(self):
         v = score_wallet(feats(), always_mega)

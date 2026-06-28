@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from .features import extract_wallet_features
 from .classifier import score_wallet, DevConfig
 from .pumpfun import is_vortex, launch_slot, craft_cursor
@@ -49,7 +49,6 @@ def participants_in_window(pump, mint, lslot, span=80, pages=20):
 
 
 def _cov(detected, oracle):
-    """Coverage ratio: detected / oracle, or None if oracle is absent/zero."""
     if not oracle:
         return None
     return round(detected / oracle, 3)

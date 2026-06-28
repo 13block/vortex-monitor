@@ -61,6 +61,8 @@ class TestParticipants(unittest.TestCase):
         # participants_in_window takes pump client (not helius)
         ws = participants_in_window(FakePump(), MINT, 427327288, span=80)
         self.assertIsInstance(ws, list)
+        self.assertIn(DEV, ws)
+        self.assertEqual(len(ws), 2)
 
 class TestAnalyze(unittest.TestCase):
     def test_detects_dev_not_bot_and_computes_confidence(self):

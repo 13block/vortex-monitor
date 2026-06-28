@@ -29,5 +29,29 @@ class TestJobQueue(unittest.TestCase):
         q = JobQueue(run_fn=lambda ca: {})
         self.assertEqual(q.status("X")["state"], "idle")
 
+    def test_resubmit_after_done_starts_new_job(self):
+        counter = [0]
+        def run_fn(ca):
+            counter[0] += 1
+            return {"n": counter[0]}
+        q = JobQueue(run_fn=run_fn)
+        q.start()
+        q.submit("CA9")
+        for _ in range(50):
+            if q.status("CA9")["state"] == "done":
+                break
+            time.sleep(0.05)
+        self.assertEqual(q.status("CA9")["state"], "done")
+        first_n = q.status("CA9")["result"]["n"]
+        self.assertEqual(first_n, 1)
+        q.submit("CA9")
+        for _ in range(50):
+            st2 = q.status("CA9")
+            if st2["state"] == "done" and st2["result"]["n"] != first_n:
+                break
+            time.sleep(0.05)
+        self.assertEqual(q.status("CA9")["state"], "done")
+        self.assertEqual(q.status("CA9")["result"]["n"], 2)
+
 if __name__ == "__main__":
     unittest.main()

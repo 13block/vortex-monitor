@@ -2,6 +2,7 @@
 # Vortex Deployer - monitor de nouveaux launches (stdlib only).
 # Poll le sitemap (10-15 min, jitter) -> diff -> scrape -> Discord, et sert une page web auto-actualisee.
 import os, re, json, time, random, threading, urllib.request, urllib.error, ssl
+from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import asdict
 from detector.helius import Helius
@@ -50,7 +51,8 @@ _pump = PumpFun()
 _registry = Registry(os.path.join(DATA_DIR, "registry.json"))
 
 def _run_detection(ca):
-    oracle = RECORDS.get(ca)
+    with LOCK:
+        oracle = RECORDS.get(ca)
     res = analyze_token(ca, oracle, _helius, _pump, _registry)
     _registry.save()
     return asdict(res)
@@ -304,14 +306,12 @@ class H(BaseHTTPRequestHandler):
         elif self.path in ("/health", "/healthz"):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
         elif self.path.startswith("/analyze"):
-            from urllib.parse import urlparse, parse_qs
             ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
             st = JOBS.submit(ca) if ca else {"state": "error", "error": "no ca"}
             body = json.dumps(st, ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(body)
         elif self.path.startswith("/detection"):
-            from urllib.parse import urlparse, parse_qs
             ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
             body = json.dumps(JOBS.status(ca), ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")

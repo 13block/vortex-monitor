@@ -19,10 +19,10 @@ class JobQueue:
         with self._lock:
             cur = self._state.get(ca, {}).get("state")
             if cur in ("pending", "running"):
-                return self._state[ca]
+                return dict(self._state[ca])
             self._state[ca] = {"state": "pending", "result": None, "error": None}
         self._q.put(ca)
-        return self._state[ca]
+        return dict(self._state[ca])
 
     def status(self, ca):
         with self._lock:
