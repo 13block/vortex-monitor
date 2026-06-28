@@ -60,6 +60,7 @@ class TestFeatures(unittest.TestCase):
         f = extract_wallet_features(DEV, [tx_funding()], MINT, LAUNCH, 1.0)
         self.assertFalse(f.traded)
         self.assertEqual(f.buy_sol, 0.0)
+        self.assertEqual(f.sell_sol, 0.0)
 
 if __name__ == "__main__":
     unittest.main()

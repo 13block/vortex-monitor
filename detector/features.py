@@ -39,7 +39,7 @@ def extract_wallet_features(address, enhanced_txs, mint, launch_ms, balance_sol)
                 if tb.get("userAccount") != address:
                     continue
                 if tb.get("mint") == mint:
-                    tdir += int(tb["rawTokenAmount"]["tokenAmount"])
+                    tdir += int(tb.get("rawTokenAmount", {}).get("tokenAmount", 0) or 0)
                 else:
                     other.add(tb.get("mint"))
         if tdir > 0:
@@ -47,14 +47,14 @@ def extract_wallet_features(address, enhanced_txs, mint, launch_ms, balance_sol)
         elif tdir < 0:
             sell += max(0, net) / LAMPORTS
         for nt in t.get("nativeTransfers", []):
-            amt = nt["amount"] / LAMPORTS
-            if (nt["toUserAccount"] == address and amt > 0.02
+            amt = nt.get("amount", 0) / LAMPORTS
+            if (nt.get("toUserAccount") == address and amt > 0.02
                     and tms <= launch_ms + 3_600_000):
                 if funder_ts is None or tms < funder_ts:
                     funder_ts = tms
-                    funder = nt["fromUserAccount"]
-            if nt["fromUserAccount"] == address and amt > 0.05 and tms >= launch_ms:
-                drains[nt["toUserAccount"]] += amt
+                    funder = nt.get("fromUserAccount")
+            if nt.get("fromUserAccount") == address and amt > 0.05 and tms >= launch_ms:
+                drains[nt.get("toUserAccount")] += amt
     drain_dest = drains.most_common(1)[0][0] if drains else None
     return WalletFeatures(
         address=address, n_tx=len(enhanced_txs), n_other_mints=len(other),
