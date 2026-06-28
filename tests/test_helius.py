@@ -28,9 +28,12 @@ class TestHelius(unittest.TestCase):
         self.assertFalse(h.is_wallet("A"))
 
     def test_enhanced_returns_list(self):
-        h = Helius("k", opener=FakeOpener([[{"signature": "s1"}]]))
+        op = FakeOpener([[{"signature": "s1"}]])
+        h = Helius("k", opener=op)
         txs = h.enhanced_transactions("A")
         self.assertEqual(txs[0]["signature"], "s1")
+        self.assertIn("/v0/addresses/A/transactions", op.calls[0])
+        self.assertIn("limit=100", op.calls[0])
 
 if __name__ == "__main__":
     unittest.main()

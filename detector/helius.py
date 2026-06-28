@@ -32,6 +32,10 @@ class Helius:
                                              headers={"Content-Type": "application/json"})
                 with self.opener.open(req, timeout=50) as r:
                     return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 410):
+                    return None
+                time.sleep(0.8 * (attempt + 1))
             except Exception:
                 time.sleep(0.8 * (attempt + 1))
         return None
