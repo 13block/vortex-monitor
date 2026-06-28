@@ -6,6 +6,10 @@ class TestRegistry(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.path = os.path.join(self.dir, "registry.json")
 
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
     def test_known_mega_seed(self):
         r = Registry(self.path)
         self.assertTrue(r.is_mega_funder(next(iter(KNOWN_MEGA))))

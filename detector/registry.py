@@ -8,7 +8,8 @@ class Registry:
         self.mega_threshold = mega_threshold
         self.recipients = {}  # funder -> set(recipient)
         if os.path.exists(path):
-            data = json.load(open(path, encoding="utf-8"))
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
             self.recipients = {k: set(v) for k, v in data.get("recipients", {}).items()}
 
     def is_mega_funder(self, addr):
@@ -24,6 +25,6 @@ class Registry:
     def save(self):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         tmp = self.path + ".tmp"
-        json.dump({"recipients": {k: sorted(v) for k, v in self.recipients.items()}},
-                  open(tmp, "w", encoding="utf-8"))
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"recipients": {k: sorted(v) for k, v in self.recipients.items()}}, f)
         os.replace(tmp, self.path)
