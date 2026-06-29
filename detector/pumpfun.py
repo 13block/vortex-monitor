@@ -3,12 +3,7 @@ import time
 import urllib.request
 import urllib.error
 
-def craft_cursor(slot: int, ts_ms: int) -> str:
-    """Cursor for swap-api.pump.fun/v2 trades: 12-digit slot + 10-digit index + -ts_ms."""
-    return f"{slot:012d}0000000000-{ts_ms}"
-
 COINS_URL = "https://frontend-api-v3.pump.fun/coins/{mint}"
-TRADES_URL = "https://swap-api.pump.fun/v2/coins/{mint}/trades?limit={limit}"
 
 class PumpFun:
     def __init__(self, opener=None):
@@ -32,24 +27,5 @@ class PumpFun:
     def coins(self, mint):
         return self._get(COINS_URL.format(mint=mint))
 
-    def trades(self, mint, cursor=None, limit=100):
-        url = TRADES_URL.format(mint=mint, limit=limit)
-        if cursor:
-            url += f"&cursor={cursor}"
-        return self._get(url)
-
 def is_vortex(coins_json):
     return "vortexdeployer.com" in ((coins_json or {}).get("metadata_uri") or "")
-
-def launch_slot(helius, mint, cap=90):
-    before = None
-    last = []
-    for _ in range(cap):
-        page = helius.signatures_page(mint, before=before, limit=1000)
-        if not page:
-            break
-        last = page
-        before = page[-1]["signature"]
-        if len(page) < 1000:
-            return last[-1]["slot"], True
-    return (last[-1]["slot"] if last else None), False

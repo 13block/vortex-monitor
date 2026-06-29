@@ -10,6 +10,12 @@ from detector.pumpfun import PumpFun
 from detector.registry import Registry
 from detector.detector import analyze_token
 from detector.jobs import JobQueue
+from detector.cache import JsonCache
+
+import re as _re
+_CA_RE = _re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+def _valid_ca(ca):
+    return bool(ca and _CA_RE.match(ca))
 
 # ---------- Config (variables d'environnement) ----------
 PORT         = int(os.environ.get("PORT", "8080"))
@@ -49,13 +55,18 @@ HELIUS_KEY = os.environ.get("HELIUS_KEY", "")
 _helius = Helius(HELIUS_KEY)
 _pump = PumpFun()
 _registry = Registry(os.path.join(DATA_DIR, "registry.json"))
+_launch_cache = JsonCache(os.path.join(DATA_DIR, "launch_cache.json"))
+_detections = JsonCache(os.path.join(DATA_DIR, "detections.json"))
 
 def _run_detection(ca):
     with LOCK:
         oracle = RECORDS.get(ca)
-    res = analyze_token(ca, oracle, _helius, _pump, _registry)
+    res = analyze_token(ca, oracle, _helius, _pump, _registry, cache=_launch_cache)
     _registry.save()
-    return asdict(res)
+    d = asdict(res)
+    _detections.set(ca, d)
+    _detections.save()
+    return d
 
 JOBS = JobQueue(_run_detection)
 
@@ -281,15 +292,26 @@ async function poll(){
  const st=document.getElementById("st");
  if(j.state==="idle"){await fetch("/analyze?ca="+ca);st.textContent="Analyse lancée…";return setTimeout(poll,2000);}
  if(j.state==="pending"||j.state==="running"){st.textContent="Analyse en cours ("+j.state+")…";return setTimeout(poll,2000);}
- if(j.state==="error"){st.innerHTML="<span class='neg'>Erreur</span>: <code>"+(j.error||"").slice(0,300)+"</code>";return;}
+ if(j.state==="error"){st.textContent="";const lbl=document.createElement("span");lbl.className="neg";lbl.textContent="Erreur";const code=document.createElement("code");code.textContent=(j.error||"").slice(0,300);st.appendChild(lbl);st.appendChild(document.createTextNode(": "));st.appendChild(code);return;}
  const r=j.result;st.innerHTML="Vortex: "+(r.is_vortex?"oui":"non")+" · creator <code>"+(r.creator||"?")+"</code> · participants "+r.participants+(r.partial?" · <span class='neg'>partiel</span>":"");
  const c=r.confidence;
  document.getElementById("sum").innerHTML=
   "<div class='bar'><b>"+c.n_detected+"</b>"+(c.n_oracle?" / "+c.n_oracle:"")+" wallets</div>"+
   "<div class='bar'>buy "+c.buy_detected+(c.buy_oracle?" / "+c.buy_oracle+" ("+Math.round((c.buy_cov||0)*100)+"%)":"")+"</div>"+
   "<div class='bar'>sell "+c.sell_detected+(c.sell_oracle?" / "+c.sell_oracle+" ("+Math.round((c.sell_cov||0)*100)+"%)":"")+"</div>";
- document.getElementById("wrap").innerHTML="<table><thead><tr><th>wallet</th><th>score</th><th>buy</th><th>sell</th><th>solde</th><th>tx</th><th>autres</th><th>preuves</th><th>funder</th></tr></thead><tbody>"+
-  r.dev_wallets.map(w=>"<tr><td><code>"+w.address+"</code></td><td>"+w.dev_score+"</td><td>"+w.buy+"</td><td>"+w.sell+"</td><td>"+w.balance+"</td><td>"+w.n_tx+"</td><td>"+w.n_other_mints+"</td><td class='mut'>"+w.reasons.join(", ")+"</td><td class='mut'><code>"+(w.funder||"-").slice(0,8)+"</code></td></tr>").join("")+"</tbody></table>";
+ const wrap=document.getElementById("wrap");wrap.innerHTML="";
+ const tbl=document.createElement("table");
+ tbl.innerHTML="<thead><tr><th>wallet</th><th>score</th><th>buy</th><th>sell</th><th>solde</th><th>tx</th><th>autres</th><th>preuves</th><th>funder</th></tr></thead>";
+ const tbody=document.createElement("tbody");
+ r.dev_wallets.forEach(w=>{
+  const tr=document.createElement("tr");
+  const addr=document.createElement("td");const ac=document.createElement("code");ac.textContent=w.address;addr.appendChild(ac);tr.appendChild(addr);
+  [w.dev_score,w.buy,w.sell,w.balance,w.n_tx,w.n_other_mints].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td);});
+  const reasons=document.createElement("td");reasons.className="mut";reasons.textContent=(w.reasons||[]).join(", ");tr.appendChild(reasons);
+  const fn=document.createElement("td");fn.className="mut";const fc=document.createElement("code");fc.textContent=(w.funder||"-").slice(0,8);fn.appendChild(fc);tr.appendChild(fn);
+  tbody.appendChild(tr);
+ });
+ tbl.appendChild(tbody);wrap.appendChild(tbl);
 }
 poll();
 </script></body></html>"""
@@ -297,26 +319,32 @@ poll();
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        if self.path.startswith("/data.json"):
+        path = urlparse(self.path).path
+        if path == "/data.json":
             with LOCK:
                 toks = sorted(RECORDS.values(), key=lambda x: x.get("date", 0), reverse=True)
                 body = json.dumps({"updated": LAST_CHECK, "tokens": toks}, ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(body)
-        elif self.path in ("/health", "/healthz"):
+        elif path in ("/health", "/healthz"):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-        elif self.path.startswith("/analyze"):
+        elif path == "/analyze":
             ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
-            st = JOBS.submit(ca) if ca else {"state": "error", "error": "no ca"}
+            if not _valid_ca(ca):
+                body = json.dumps({"state": "error", "error": "invalid ca"}, ensure_ascii=False).encode()
+                self.send_response(400); self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers(); self.wfile.write(body); return
+            st = JOBS.submit(ca)
             body = json.dumps(st, ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(body)
-        elif self.path.startswith("/detection"):
+        elif path == "/detection":
             ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
-            body = json.dumps(JOBS.status(ca), ensure_ascii=False).encode()
+            st = JOBS.status(ca) if _valid_ca(ca) else {"state": "idle", "result": None, "error": None}
+            body = json.dumps(st, ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(body)
-        elif self.path.startswith("/token"):
+        elif path == "/token":
             b = TOKEN_PAGE.encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers(); self.wfile.write(b)

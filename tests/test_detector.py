@@ -1,5 +1,5 @@
 import unittest
-from detector.detector import analyze_token, participants_in_window, DetectionResult
+from detector.detector import analyze_token, enumerate_launch, DetectionResult
 
 MINT = "Gn2SDa53t9zegwdKX71ywUVZbjJZDXnBBkGP3T2Apump"
 DEV = "DevWallet1111111111111111111111111111111111"
@@ -38,15 +38,32 @@ class FakePump:
     def coins(self, mint):
         return {"creator": CREATOR, "created_timestamp": LAUNCH_TS,
                 "metadata_uri": "https://api.vortexdeployer.com/metadata/x.json"}
-    def trades(self, mint, cursor=None, limit=100):
-        return {"trades": [
-            {"userAddress": DEV, "type": "buy", "slotIndexId": "000427327288" + "0"*10, "amountSol": "0.5"},
-            {"userAddress": BOT, "type": "buy", "slotIndexId": "000427327289" + "0"*10, "amountSol": "0.2"},
-        ], "pagination": {"hasMore": False, "nextCursor": None}}
+
+# Signatures page (newest -> oldest within the page). The oldest three entries map,
+# via transaction(), to CREATOR, BOT, DEV signers (so chronological order = DEV, BOT, CREATOR).
+SIG_TO_SIGNER = {
+    "sig_dev": DEV,
+    "sig_bot": BOT,
+    "sig_creator": CREATOR,
+}
 
 class FakeHelius:
-    def __init__(self): self._sig = [[{"slot": 427327288, "signature": "z"}]]
-    def signatures_page(self, address, before=None, limit=1000): return self._sig[0]
+    def __init__(self):
+        # newest first; oldest entries (tail) are creator/bot/dev
+        self._page = [
+            {"slot": 427327290, "signature": "sig_newest"},
+            {"slot": 427327289, "signature": "sig_dev"},
+            {"slot": 427327288, "signature": "sig_bot"},
+            {"slot": 427327287, "signature": "sig_creator"},
+        ]
+    def signatures_page(self, address, before=None, limit=1000):
+        # Single short page (len < 1000) -> exact launch
+        if before:
+            return []
+        return self._page
+    def transaction(self, signature):
+        signer = SIG_TO_SIGNER.get(signature, "OtherSigner000000000000000000000000000000000")
+        return {"transaction": {"message": {"accountKeys": [{"pubkey": signer}]}}}
     def enhanced_transactions(self, address, limit=100, before=None):
         return {DEV: dev_txs(), BOT: bot_txs(), CREATOR: []}.get(address, [])
     def balance_sol(self, address): return {DEV: 0.001, BOT: 4.0, CREATOR: 0.0}.get(address, 0.0)
@@ -56,18 +73,19 @@ class FakeRegistry:
     def is_mega_funder(self, addr): return False
     def note_funding(self, f, r): pass
 
-class TestParticipants(unittest.TestCase):
-    def test_window_returns_distinct_buyers_in_span(self):
-        # participants_in_window takes pump client (not helius)
-        ws = participants_in_window(FakePump(), MINT, 427327288, span=80)
-        self.assertIsInstance(ws, list)
-        self.assertIn(DEV, ws)
-        self.assertEqual(len(ws), 2)
+class TestEnumerateLaunch(unittest.TestCase):
+    def test_enumerate_launch_returns_slot_exact_and_chrono_participants(self):
+        lslot, exact, parts = enumerate_launch(FakeHelius(), MINT, window_txs=3)
+        # launch_slot = oldest entry's slot
+        self.assertEqual(lslot, 427327287)
+        self.assertTrue(exact)
+        # window_txs=3 oldest entries, chronological (oldest first): creator, bot, dev
+        self.assertEqual(parts, [CREATOR, BOT, DEV])
 
 class TestAnalyze(unittest.TestCase):
     def test_detects_dev_not_bot_and_computes_confidence(self):
         oracle = {"wallets": 2, "buy": 0.5, "sell": 3.0}
-        res = analyze_token(MINT, oracle, FakeHelius(), FakePump(), FakeRegistry())
+        res = analyze_token(MINT, oracle, FakeHelius(), FakePump(), FakeRegistry(), cache=None)
         self.assertIsInstance(res, DetectionResult)
         self.assertTrue(res.is_vortex)
         self.assertEqual(res.creator, CREATOR)

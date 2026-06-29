@@ -2,8 +2,9 @@
 import threading, queue, traceback
 
 class JobQueue:
-    def __init__(self, run_fn):
+    def __init__(self, run_fn, max_entries=200):
         self.run_fn = run_fn
+        self.max_entries = max_entries
         self._q = queue.Queue()
         self._state = {}            # ca -> dict
         self._lock = threading.Lock()
@@ -21,6 +22,17 @@ class JobQueue:
             if cur in ("pending", "running"):
                 return dict(self._state[ca])
             self._state[ca] = {"state": "pending", "result": None, "error": None}
+            # Bound retained state: evict oldest done/error entries (FIFO insertion order),
+            # never evicting pending/running jobs.
+            while len(self._state) > self.max_entries:
+                victim = None
+                for k, v in self._state.items():
+                    if v.get("state") in ("done", "error"):
+                        victim = k
+                        break
+                if victim is None:
+                    break
+                del self._state[victim]
         self._q.put(ca)
         return dict(self._state[ca])
 

@@ -57,6 +57,10 @@ class Helius:
             params[1]["before"] = before
         return self.rpc("getSignaturesForAddress", params) or []
 
+    def transaction(self, signature):
+        return self.rpc("getTransaction",
+                        [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+
     def balance_sol(self, address):
         r = self.rpc("getBalance", [address]) or {}
         return (r.get("value", 0) or 0) / LAMPORTS

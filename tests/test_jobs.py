@@ -53,5 +53,19 @@ class TestJobQueue(unittest.TestCase):
         self.assertEqual(q.status("CA9")["state"], "done")
         self.assertEqual(q.status("CA9")["result"]["n"], 2)
 
+    def test_evicts_old_done_entries_when_over_cap(self):
+        q = JobQueue(run_fn=lambda ca: {"mint": ca}, max_entries=2)
+        q.start()
+        for ca in ("A1", "B2", "C3"):
+            q.submit(ca)
+            for _ in range(50):
+                if q.status(ca)["state"] == "done":
+                    break
+                time.sleep(0.05)
+        self.assertLessEqual(len(q._state), 2)
+        # oldest (A1) should have been evicted
+        self.assertEqual(q.status("A1")["state"], "idle")
+        self.assertEqual(q.status("C3")["state"], "done")
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from .features import extract_wallet_features
 from .classifier import score_wallet, DevConfig
-from .pumpfun import is_vortex, launch_slot, craft_cursor
+from .pumpfun import is_vortex
 
 
 @dataclass
@@ -18,34 +18,53 @@ class DetectionResult:
     partial: bool
 
 
-def participants_in_window(pump, mint, lslot, span=80, pages=20):
-    """Return distinct buyers from pump.fun trades within lslot+span slots."""
-    if lslot is None:
-        return []
-    ts_hint = 9_999_999_999_999  # upper-bound ts so cursor starts near launch slot
-    cursor = craft_cursor(lslot + 45, ts_hint)
-    seen, out, base = set(), [], None
-    for _ in range(pages):
-        j = pump.trades(mint, cursor=cursor)
-        if not j or not j.get("trades"):
+def enumerate_launch(helius, mint, cap_pages=90, window_txs=250, cache=None):
+    """Paginate the mint's signatures to the oldest, then return
+    (launch_slot, exact, participants) where participants = the distinct fee-payers
+    (accountKeys[0]) of the oldest `window_txs` transactions of the mint.
+    Complete launch-participant source (includes fresh dev wallets), per spec §5.
+    `cache` (optional JsonCache) memoizes the result per mint (immutable)."""
+    if cache is not None:
+        hit = cache.get(mint)
+        if hit:
+            return hit.get("launch_slot"), hit.get("exact", False), list(hit.get("participants", []))
+    before = None
+    last_page = []
+    exact = False
+    for _ in range(cap_pages):
+        page = helius.signatures_page(mint, before=before, limit=1000)
+        if not page:
             break
-        # determine base slot from first batch
-        for t in j["trades"]:
-            slot = int(t["slotIndexId"][:12])
-            base = slot if base is None else min(base, slot)
-        for t in j["trades"]:
-            if t["type"] != "buy":
-                continue
-            if int(t["slotIndexId"][:12]) > base + span:
-                continue
-            w = t["userAddress"]
-            if w not in seen:
-                seen.add(w)
-                out.append(w)
-        if not j["pagination"].get("hasMore"):
+        last_page = page
+        before = page[-1].get("signature")
+        if len(page) < 1000:
+            exact = True
             break
-        cursor = j["pagination"]["nextCursor"]
-    return out
+    if not last_page:
+        return None, False, []
+    launch_slot = last_page[-1].get("slot")
+    # oldest window: tail of the final page (newest->oldest within the page; reverse to chronological)
+    oldest = list(reversed(last_page[-window_txs:]))
+    seen, participants = set(), []
+    for s in oldest:
+        sig = s.get("signature")
+        if not sig:
+            continue
+        tx = helius.transaction(sig)
+        if not tx:
+            continue
+        try:
+            keys = tx["transaction"]["message"]["accountKeys"]
+            payer = keys[0]["pubkey"] if isinstance(keys[0], dict) else keys[0]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if payer and payer not in seen:
+            seen.add(payer)
+            participants.append(payer)
+    if cache is not None and launch_slot is not None:
+        cache.set(mint, {"launch_slot": launch_slot, "exact": exact, "participants": participants})
+        cache.save()
+    return launch_slot, exact, participants
 
 
 def _cov(detected, oracle):
@@ -54,7 +73,7 @@ def _cov(detected, oracle):
     return round(detected / oracle, 3)
 
 
-def analyze_token(mint, oracle, helius, pump, registry, cfg=None):
+def analyze_token(mint, oracle, helius, pump, registry, cfg=None, cache=None):
     """Orchestrate dev-wallet detection for a given token mint.
 
     Parameters
@@ -65,6 +84,7 @@ def analyze_token(mint, oracle, helius, pump, registry, cfg=None):
     pump     : PumpFun client
     registry : Registry client
     cfg      : DevConfig (default constructed if None)
+    cache    : optional JsonCache memoizing launch enumeration per mint
 
     Returns
     -------
@@ -78,11 +98,8 @@ def analyze_token(mint, oracle, helius, pump, registry, cfg=None):
     launch_ms = coins.get("created_timestamp") or 0
     vortex = is_vortex(coins)
 
-    # --- launch slot ---
-    lslot, exact = launch_slot(helius, mint)
-
-    # --- participant window (pump trades) ---
-    parts = participants_in_window(pump, mint, lslot)
+    # --- launch enumeration (mint signatures -> participants) ---
+    lslot, exact, parts = enumerate_launch(helius, mint, cache=cache)
 
     # Build candidate list: creator first, then window participants (deduped)
     cand = ([creator] if creator else []) + [p for p in parts if p != creator]
@@ -90,7 +107,7 @@ def analyze_token(mint, oracle, helius, pump, registry, cfg=None):
 
     dev = []
     funders: set[str] = set()
-    partial = not exact
+    partial = (not exact) or (not coins)
 
     for addr in cand:
         txs = helius.enhanced_transactions(addr)
