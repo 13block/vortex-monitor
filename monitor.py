@@ -293,7 +293,7 @@ async function poll(){
  if(j.state==="idle"){await fetch("/analyze?ca="+ca);st.textContent="Analyse lancée…";return setTimeout(poll,2000);}
  if(j.state==="pending"||j.state==="running"){st.textContent="Analyse en cours ("+j.state+")…";return setTimeout(poll,2000);}
  if(j.state==="error"){st.textContent="";const lbl=document.createElement("span");lbl.className="neg";lbl.textContent="Erreur";const code=document.createElement("code");code.textContent=(j.error||"").slice(0,300);st.appendChild(lbl);st.appendChild(document.createTextNode(": "));st.appendChild(code);return;}
- const r=j.result;st.innerHTML="Vortex: "+(r.is_vortex?"oui":"non")+" · creator <code>"+(r.creator||"?")+"</code> · participants "+r.participants+(r.partial?" · <span class='neg'>partiel</span>":"");
+ const r=j.result;st.textContent="Vortex: "+(r.is_vortex?"oui":"non")+" · creator ";const cc=document.createElement("code");cc.textContent=(r.creator||"?");st.appendChild(cc);st.appendChild(document.createTextNode(" · participants "+r.participants));if(r.partial){const pp=document.createElement("span");pp.className="neg";pp.textContent=" · partiel";st.appendChild(pp);}
  const c=r.confidence;
  document.getElementById("sum").innerHTML=
   "<div class='bar'><b>"+c.n_detected+"</b>"+(c.n_oracle?" / "+c.n_oracle:"")+" wallets</div>"+
