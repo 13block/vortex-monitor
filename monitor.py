@@ -317,7 +317,7 @@ main{max-width:1440px;margin:0 auto;padding:18px 22px 90px}
 .tablewrap{border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
 .scroll{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:13px}
-thead th{position:sticky;top:var(--htop);background:var(--surface);text-align:right;white-space:nowrap;padding:10px 14px;font-size:11.5px;font-weight:500;color:var(--muted);border-bottom:1px solid var(--border);cursor:pointer;user-select:none;transition:color .12s;z-index:2}
+thead th{position:sticky;top:0;background:var(--surface);text-align:right;white-space:nowrap;padding:10px 14px;font-size:11.5px;font-weight:500;color:var(--muted);border-bottom:1px solid var(--border);cursor:pointer;user-select:none;transition:color .12s;z-index:2}
 thead th:hover{color:var(--fg)}
 thead th.l,tbody td.l{text-align:left}
 thead th.np{cursor:default}thead th.np:hover{color:var(--muted)}
@@ -390,14 +390,13 @@ function renderTable(r){$("b").innerHTML=r.map((x,i)=>{const bc=x.benef>0?"pos":
 function syncControls(){$("sortsel").value=sortK;$("dir").querySelector("i").className=asc?"ph ph-arrow-up":"ph ph-arrow-down";document.querySelectorAll("#viewseg button").forEach(b=>b.classList.toggle("on",b.dataset.v==view));document.querySelectorAll("#bfseg button").forEach(b=>b.classList.toggle("on",b.dataset.bf==bf))}
 function render(){const r=filtered();const cards=$("cards"),tw=$("tablewrap"),emp=$("empty");const isCards=view=="cards";cards.classList.toggle("hide",!isCards);tw.classList.toggle("hide",isCards);emp.classList.toggle("hide",r.length>0);if(isCards)renderCards(r);else renderTable(r);syncControls()}
 async function load(){try{const j=await (await fetch("/data.json?_="+Date.now())).json();DATA=j.tokens||[];$("n").textContent=DATA.length;const tbn=DATA.reduce((s,x)=>s+(x.benef||0),0),tw=DATA.reduce((s,x)=>s+(x.wallets||0),0);const e=$("tbn");e.textContent=(tbn>=0?"+":"")+tbn.toFixed(1);e.className=tbn>=0?"pos":"neg";$("tw").textContent=tw;$("upd").textContent="maj "+ago(j.updated);render()}catch(err){$("upd").textContent="hors-ligne"}}
-function setHtop(){document.documentElement.style.setProperty("--htop",(document.querySelector("header").offsetHeight)+"px")}
 $("q").oninput=render;
 $("sortsel").onchange=e=>{sortK=e.target.value;render()};
 $("dir").onclick=()=>{asc=!asc;render()};
 $("bfseg").onclick=e=>{const b=e.target.closest("button");if(!b)return;bf=b.dataset.bf;render()};
 $("viewseg").onclick=e=>{const b=e.target.closest("button");if(!b)return;view=b.dataset.v;localStorage.setItem("vmview",view);render()};
 document.querySelectorAll("th[data-k]").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(sortK==k)asc=!asc;else{sortK=k;asc=(k=="sym")}render()});
-addEventListener("resize",setHtop);setHtop();load();setInterval(load,60000);
+load();setInterval(load,60000);
 </script></body></html>"""
 
 class H(BaseHTTPRequestHandler):
