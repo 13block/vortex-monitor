@@ -2,20 +2,9 @@
 # Vortex Deployer - monitor de nouveaux launches (stdlib only).
 # Poll le sitemap (10-15 min, jitter) -> diff -> scrape -> Discord, et sert une page web auto-actualisee.
 import os, re, json, time, random, threading, urllib.request, urllib.error, ssl
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from dataclasses import asdict
-from detector.helius import Helius
 from detector.pumpfun import PumpFun
-from detector.registry import Registry
-from detector.detector import analyze_token
-from detector.jobs import JobQueue
-from detector.cache import JsonCache
-
-import re as _re
-_CA_RE = _re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-def _valid_ca(ca):
-    return bool(ca and _CA_RE.match(ca))
 
 # ---------- Config (variables d'environnement) ----------
 PORT         = int(os.environ.get("PORT", "8080"))
@@ -51,24 +40,7 @@ RECORDS = {}            # ca -> dict
 LAST_CHECK = 0
 BASELINE_DONE = False
 
-HELIUS_KEY = os.environ.get("HELIUS_KEY", "")
-_helius = Helius(HELIUS_KEY)
 _pump = PumpFun()
-_registry = Registry(os.path.join(DATA_DIR, "registry.json"))
-_launch_cache = JsonCache(os.path.join(DATA_DIR, "launch_cache.json"))
-_detections = JsonCache(os.path.join(DATA_DIR, "detections.json"))
-
-def _run_detection(ca):
-    with LOCK:
-        oracle = RECORDS.get(ca)
-    res = analyze_token(ca, oracle, _helius, _pump, _registry, cache=_launch_cache)
-    _registry.save()
-    d = asdict(res)
-    _detections.set(ca, d)
-    _detections.save()
-    return d
-
-JOBS = JobQueue(_run_detection)
 
 def log(*a): print(time.strftime("%H:%M:%S"), *a, flush=True)
 
@@ -122,20 +94,36 @@ def fmt_usd(v):
     if v >= 1e3: return f"${v/1e3:.1f}K"
     return f"${v:.0f}"
 
-def pump_meta(ca):
-    # Best-effort enrichment from pump.fun: name, avatar, socials, ATH market cap (USD).
+def pump_fetch(ca):
+    # Best-effort raw metadata from pump.fun: name, avatar, ATH MC (USD), socials URLs.
     try:
         c = _pump.coins(ca) or {}
     except Exception as e:
-        log("pump meta err", e); return {}
-    socials = []
-    for label, key in (("Website", "website"), ("Twitter", "twitter"), ("Telegram", "telegram")):
-        u = c.get(key)
-        if u and isinstance(u, str) and u.startswith("http"):
-            socials.append(f"[{label}]({u})")
+        log("pump fetch err", e); return {}
+    def link(k):
+        u = c.get(k)
+        return u if (isinstance(u, str) and u.startswith("http")) else None
     return {"name": c.get("name"), "sym": c.get("symbol"),
             "image": (c.get("image_uri") or None), "ath": c.get("ath_market_cap"),
-            "socials": " · ".join(socials)}
+            "website": link("website"), "twitter": link("twitter"), "telegram": link("telegram")}
+
+def pump_meta(ca):
+    # Discord-formatted view of pump_fetch (socials as markdown links).
+    m = pump_fetch(ca)
+    socials = []
+    for label, key in (("Website", "website"), ("Twitter", "twitter"), ("Telegram", "telegram")):
+        if m.get(key): socials.append(f"[{label}]({m[key]})")
+    m["socials"] = " · ".join(socials)
+    return m
+
+def enrich_record(ca, rec):
+    # Add avatar / ATH / socials to a token record (in place). Marks rec["meta"]=1 on success.
+    m = pump_fetch(ca)
+    if not m: return rec
+    rec["image"] = m.get("image"); rec["ath"] = m.get("ath")
+    rec["website"] = m.get("website"); rec["twitter"] = m.get("twitter"); rec["telegram"] = m.get("telegram")
+    rec["meta"] = 1
+    return rec
 
 def post_discord(d):
     if not WEBHOOKS: return
@@ -196,6 +184,7 @@ def poll_once():
     for ca in reversed(new):  # plus ancien -> plus recent
         d = scrape_token(ca)
         if not d: continue
+        enrich_record(ca, d)
         with LOCK:
             RECORDS[ca] = d; save_state()
         if BASELINE_DONE:
@@ -205,7 +194,26 @@ def poll_once():
         BASELINE_DONE = True
         log("baseline etablie (silencieuse):", len(RECORDS))
     refresh_recent()
+    backfill_meta()
     LAST_CHECK = int(time.time() * 1000)
+
+def backfill_meta(limit=25):
+    # Populate avatar/ATH/socials for older records that predate enrichment.
+    with LOCK:
+        todo = [r["ca"] for r in RECORDS.values() if not r.get("meta")][:limit]
+    n = 0
+    for ca in todo:
+        rec = {}
+        enrich_record(ca, rec)
+        if not rec.get("meta"): continue
+        with LOCK:
+            if ca in RECORDS:
+                RECORDS[ca].update({k: rec.get(k) for k in ("image", "ath", "website", "twitter", "telegram", "meta")})
+                n += 1
+        time.sleep(0.2)
+    if n:
+        with LOCK: save_state()
+        log(f"backfill meta: {n}/{len(todo)}")
 
 def refresh_recent():
     # Re-scrape les tokens recents dont les stats peuvent encore bouger (sans re-ping Discord).
@@ -217,11 +225,14 @@ def refresh_recent():
     for ca in recent:
         d = scrape_token(ca)
         if not d: continue
+        enrich_record(ca, d)
         with LOCK:
             old = RECORDS.get(ca, {})
             d["date"] = old.get("date", d["date"])           # garde la date d'origine
             if old.get("sym") and old["sym"] != "?":         # garde sym/name d'origine si valides
                 d["sym"] = old["sym"]; d["name"] = old.get("name", d["name"])
+            for k in ("image", "ath", "website", "twitter", "telegram", "meta"):
+                if k not in d and k in old: d[k] = old[k]    # garde l'enrichissement si pump a echoue
             if d != old:
                 RECORDS[ca] = d; upd += 1
         time.sleep(0.3)
@@ -244,107 +255,87 @@ PAGE = """<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
 *{box-sizing:border-box}body{margin:0;background:#0b0e14;color:#e6e9ef;font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px}
 header{padding:16px 22px;border-bottom:1px solid #1c222e;position:sticky;top:0;background:#0b0e14;z-index:5}
 h1{margin:0;font-size:18px}.sub{color:#8b94a7;font-size:12px;margin-top:4px}
-.bar{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;align-items:center}
+.bar{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;align-items:center}
 .stat{background:#131825;border:1px solid #1c222e;border-radius:8px;padding:7px 12px}
 .stat b{display:block;font-size:15px}.stat span{font-size:11px;color:#8b94a7}
-input{background:#131825;border:1px solid #2a3242;color:#e6e9ef;border-radius:8px;padding:8px 12px;font-size:13px;width:240px}
-.wrap{padding:0 12px 60px}table{border-collapse:collapse;width:100%;margin-top:8px}
+input{background:#131825;border:1px solid #2a3242;color:#e6e9ef;border-radius:8px;padding:8px 12px;font-size:13px;width:230px}
+.spacer{flex:1}
+.seg{display:inline-flex;border:1px solid #2a3242;border-radius:8px;overflow:hidden}
+.seg button{background:#131825;color:#9aa4b8;border:0;padding:7px 14px;font-size:12px;cursor:pointer}
+.seg button.on{background:#1a2030;color:#fff}
+#upd{color:#8b94a7;font-size:12px}
+.wrap{padding:14px 18px 70px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:12px}
+.card{background:#131825;border:1px solid #1c222e;border-radius:12px;padding:13px;display:flex;flex-direction:column;gap:11px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:#2f3a4d;transform:translateY(-1px)}
+.chead{display:flex;align-items:center;gap:10px;min-width:0}
+.avw{position:relative;flex:none}
+.avw .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:700;color:#5b6478;background:#0e131c}
+.avw .ph,.avw img{border-radius:10px;border:1px solid #222a38}
+.avw img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.avw.av{width:42px;height:42px;font-size:16px}
+.avw.tav{width:22px;height:22px;font-size:11px;display:inline-block;vertical-align:middle;margin-right:7px}
+.tt{min-width:0;flex:1}
+.tname{font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ttick{color:#8b94a7;font-size:12px;font-family:ui-monospace,monospace}
+.badge{background:#1c3a2a;color:#3ddc84;border:1px solid #2c5a42;border-radius:5px;font-size:10px;padding:1px 5px;flex:none}
+.cstats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.cell{background:#0e131c;border:1px solid #161b26;border-radius:8px;padding:6px 8px;overflow:hidden}
+.cell .k{font-size:9px;color:#7c8699;text-transform:uppercase;letter-spacing:.05em}
+.cell .v{font-size:13px;font-variant-numeric:tabular-nums;font-family:ui-monospace,monospace;margin-top:2px;white-space:nowrap}
+.cfoot{display:flex;align-items:center;gap:7px}
+.ico{color:#9aa4b8;display:inline-flex;padding:5px;border:1px solid #2a3242;border-radius:8px;line-height:0}
+.ico:hover{color:#fff;background:#1a2030;border-color:#3a4763}
+a.gm{color:#7aa2ff;text-decoration:none;border:1px solid #2a3242;padding:4px 9px;border-radius:8px;font-size:12px;margin-left:auto}
+a.gm:hover{background:#1a2030}
+.pos{color:#3ddc84}.neg{color:#ff5c5c}
+table{border-collapse:collapse;width:100%}
 th,td{padding:9px 12px;text-align:right;white-space:nowrap;border-bottom:1px solid #161b26}
-th{position:sticky;top:120px;background:#11151f;cursor:pointer;user-select:none;font-size:12px;color:#9aa4b8}
+th{position:sticky;top:118px;background:#11151f;cursor:pointer;user-select:none;font-size:12px;color:#9aa4b8}
 th:hover{color:#fff}th.l,td.l{text-align:left}tr:hover td{background:#10141d}
 td.num{font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace}
-.pos{color:#3ddc84}.neg{color:#ff5c5c}.sym{font-weight:700}.nm{color:#8b94a7;font-size:12px}
-a.gm{color:#7aa2ff;text-decoration:none;border:1px solid #2a3242;padding:3px 8px;border-radius:6px;font-size:12px}
-a.gm:hover{background:#1a2030}.arrow{font-size:10px;opacity:.6;margin-left:3px}.rank{color:#5b6478}
-.badge{background:#1c3a2a;color:#3ddc84;border:1px solid #2c5a42;border-radius:5px;font-size:10px;padding:1px 5px;margin-left:6px}
-#upd{color:#8b94a7;font-size:12px}
+.sym{font-weight:700}.nm{color:#8b94a7;font-size:12px}
+.arrow{font-size:10px;opacity:.6;margin-left:3px}.rank{color:#5b6478}
+.hide{display:none}
 </style></head><body>
 <header><h1>Vortex Monitor</h1>
-<div class="sub">Page live - auto-actualisee. Volume/wallets = pages vortex - benef = sell-buy (SOL) - liens gmgn.</div>
+<div class="sub">Page live · auto-actualisée · benef = sell − buy (SOL) · ATH = market cap max (pump.fun)</div>
 <div class="bar">
 <div class="stat"><b id="n">-</b><span>tokens</span></div>
 <div class="stat"><b id="tbn">-</b><span>benef total SOL</span></div>
 <div class="stat"><b id="tw">-</b><span>wallets total</span></div>
-<input id="q" placeholder="Rechercher symbole / nom / CA"><span id="upd"></span>
+<input id="q" placeholder="Rechercher symbole / nom / CA">
+<div class="spacer"></div>
+<div class="seg"><button id="vcards">Cartes</button><button id="vtable">Tableau</button></div>
+<span id="upd"></span>
 </div></header>
-<div class="wrap"><table id="t"><thead><tr>
+<div class="wrap">
+<div id="cards" class="cards"></div>
+<table id="t" class="hide"><thead><tr>
 <th class="l">#</th><th class="l" data-k="sym">Token</th><th data-k="date">Date</th>
 <th data-k="buy">Buy</th><th data-k="sell">Sell</th><th data-k="benef">Benef</th>
-<th data-k="wallets">Wallets</th><th class="l">Lien</th>
-</tr></thead><tbody id="b"></tbody></table></div>
+<th data-k="wallets">Wallets</th><th data-k="ath">ATH</th><th class="l">Liens</th>
+</tr></thead><tbody id="b"></tbody></table>
+</div>
 <script>
-let DATA=[],sortK="date",asc=false;
-const fmtD=ms=>{if(!ms)return"-";const d=new Date(ms);return d.toLocaleString("fr-FR",{timeZone:"Europe/Paris",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})};
-const ago=ms=>{const s=(Date.now()-ms)/1000;if(s<3600)return Math.floor(s/60)+"min";if(s<86400)return Math.floor(s/3600)+"h";return Math.floor(s/86400)+"j"};
-function render(){
- let r=DATA.slice();const q=document.getElementById("q").value.toLowerCase().trim();
- if(q)r=r.filter(x=>(x.sym+" "+x.name+" "+x.ca).toLowerCase().includes(q));
- r.sort((a,c)=>{let va=a[sortK],vc=c[sortK];if(sortK=="sym"){va=(a.sym||"").toLowerCase();vc=(c.sym||"").toLowerCase()}if(va<vc)return asc?-1:1;if(va>vc)return asc?1:-1;return 0});
- document.getElementById("b").innerHTML=r.map((x,i)=>{
-  const bc=x.benef>0?"pos":(x.benef<0?"neg":"");const sg=x.benef>0?"+":"";
-  const isnew=(Date.now()-x.date)<3600000?'<span class="badge">NEW</span>':"";
-  return `<tr><td class="l rank">${i+1}</td>
-  <td class="l"><span class="sym">$${x.sym}</span> <span class="nm">${x.name||""}</span>${isnew}</td>
-  <td class="num">${fmtD(x.date)}</td><td class="num">${x.buy.toFixed(2)}</td>
-  <td class="num">${x.sell.toFixed(2)}</td><td class="num ${bc}">${sg}${x.benef.toFixed(2)}</td>
-  <td class="num">${x.wallets}</td>
-  <td class="l"><a class="gm" href="https://gmgn.ai/sol/token/${x.ca}" target="_blank">gmgn</a> <a class="gm" href="/token?ca=${x.ca}" target="_blank">analyser</a></td></tr>`}).join("");
- document.querySelectorAll("th[data-k]").forEach(th=>{th.querySelector(".arrow")?.remove();if(th.dataset.k==sortK){const s=document.createElement("span");s.className="arrow";s.textContent=asc?"▲":"▼";th.appendChild(s)}});
-}
-async function load(){
- const j=await (await fetch("/data.json?_="+Date.now())).json();
- DATA=j.tokens;
- document.getElementById("n").textContent=DATA.length;
- const tbn=DATA.reduce((s,x)=>s+x.benef,0),tw=DATA.reduce((s,x)=>s+(x.wallets||0),0);
- const e=document.getElementById("tbn");e.textContent=(tbn>=0?"+":"")+tbn.toFixed(1);e.className=tbn>=0?"pos":"neg";
- document.getElementById("tw").textContent=tw;
- document.getElementById("upd").textContent="Maj sitemap il y a "+ago(j.updated);
- render();
-}
+let DATA=[],sortK="date",asc=false,view=localStorage.getItem("vmview")||"cards";
+const fmtD=ms=>{if(!ms)return"-";const d=new Date(ms);return d.toLocaleString("fr-FR",{timeZone:"Europe/Paris",year:"2-digit",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})};
+const ago=ms=>{if(!ms)return"-";const s=(Date.now()-ms)/1000;if(s<3600)return Math.floor(s/60)+"min";if(s<86400)return Math.floor(s/3600)+"h";return Math.floor(s/86400)+"j"};
+const fmtUsd=v=>{if(v==null||isNaN(v))return"-";v=+v;if(v>=1e9)return"$"+(v/1e9).toFixed(2)+"B";if(v>=1e6)return"$"+(v/1e6).toFixed(2)+"M";if(v>=1e3)return"$"+(v/1e3).toFixed(1)+"K";return"$"+v.toFixed(0)};
+const esc=s=>(s==null?"":""+s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SVG={web:'<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/></svg>',x:'<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M18.24 2.25h3.3l-7.22 8.26 8.5 11.24h-6.66l-5.21-6.82-5.97 6.82H1.68l7.73-8.84L1.25 2.25h6.83l4.71 6.23 5.45-6.23zm-1.16 17.52h1.83L7.01 4.13H5.05z"/></svg>',tg:'<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M21.95 4.3l-3.32 15.66c-.25 1.1-.9 1.37-1.83.85l-5.05-3.72-2.44 2.35c-.27.27-.5.5-1.02.5l.36-5.13L18.4 6.4c.4-.36-.09-.56-.62-.2L6.7 13.18l-4.98-1.56c-1.08-.34-1.1-1.08.23-1.6l19.46-7.5c.9-.33 1.69.2 1.4 1.78z"/></svg>'};
+const avatar=(x,sz)=>`<div class="avw ${sz}"><div class="ph">${esc((x.sym||"?")[0])}</div>${x.image?`<img src="${esc(x.image)}" loading="lazy" onerror="this.remove()">`:""}</div>`;
+const links=x=>{let h="";if(x.website)h+=`<a class="ico" href="${esc(x.website)}" target="_blank" rel="noopener" title="Website">${SVG.web}</a>`;if(x.twitter)h+=`<a class="ico" href="${esc(x.twitter)}" target="_blank" rel="noopener" title="Twitter">${SVG.x}</a>`;if(x.telegram)h+=`<a class="ico" href="${esc(x.telegram)}" target="_blank" rel="noopener" title="Telegram">${SVG.tg}</a>`;h+=`<a class="gm" href="https://gmgn.ai/sol/token/${esc(x.ca)}" target="_blank" rel="noopener">gmgn</a>`;return h};
+function filtered(){let r=DATA.slice();const q=document.getElementById("q").value.toLowerCase().trim();if(q)r=r.filter(x=>(x.sym+" "+x.name+" "+x.ca).toLowerCase().includes(q));r.sort((a,c)=>{let va=a[sortK]??0,vc=c[sortK]??0;if(sortK=="sym"){va=(a.sym||"").toLowerCase();vc=(c.sym||"").toLowerCase()}if(va<vc)return asc?-1:1;if(va>vc)return asc?1:-1;return 0});return r}
+function renderCards(r){document.getElementById("cards").innerHTML=r.map(x=>{const bc=x.benef>0?"pos":(x.benef<0?"neg":"");const sg=x.benef>0?"+":"";const isnew=(Date.now()-x.date)<3600000?'<span class="badge">NEW</span>':"";return `<div class="card"><div class="chead">${avatar(x,"av")}<div class="tt"><div class="tname">${esc(x.name||x.sym)}</div><div class="ttick">$${esc(x.sym)}</div></div>${isnew}</div><div class="cstats"><div class="cell"><div class="k">Buy</div><div class="v">${(x.buy||0).toFixed(2)}</div></div><div class="cell"><div class="k">Sell</div><div class="v">${(x.sell||0).toFixed(2)}</div></div><div class="cell"><div class="k">Benef</div><div class="v ${bc}">${sg}${(x.benef||0).toFixed(2)}</div></div><div class="cell"><div class="k">Wallets</div><div class="v">${x.wallets||0}</div></div><div class="cell"><div class="k">ATH MC</div><div class="v">${fmtUsd(x.ath)}</div></div><div class="cell"><div class="k">Âge</div><div class="v">${ago(x.date)}</div></div></div><div class="cfoot">${links(x)}</div></div>`}).join("")}
+function renderTable(r){document.getElementById("b").innerHTML=r.map((x,i)=>{const bc=x.benef>0?"pos":(x.benef<0?"neg":"");const sg=x.benef>0?"+":"";const isnew=(Date.now()-x.date)<3600000?'<span class="badge">NEW</span>':"";return `<tr><td class="l rank">${i+1}</td><td class="l">${avatar(x,"tav")}<span class="sym">$${esc(x.sym)}</span> <span class="nm">${esc(x.name||"")}</span> ${isnew}</td><td class="num">${fmtD(x.date)}</td><td class="num">${(x.buy||0).toFixed(2)}</td><td class="num">${(x.sell||0).toFixed(2)}</td><td class="num ${bc}">${sg}${(x.benef||0).toFixed(2)}</td><td class="num">${x.wallets||0}</td><td class="num">${fmtUsd(x.ath)}</td><td class="l">${links(x)}</td></tr>`}).join("");document.querySelectorAll("th[data-k]").forEach(th=>{th.querySelector(".arrow")?.remove();if(th.dataset.k==sortK){const s=document.createElement("span");s.className="arrow";s.textContent=asc?"▲":"▼";th.appendChild(s)}})}
+function render(){const r=filtered();const cards=document.getElementById("cards"),tbl=document.getElementById("t");if(view=="cards"){cards.classList.remove("hide");tbl.classList.add("hide");renderCards(r)}else{tbl.classList.remove("hide");cards.classList.add("hide");renderTable(r)}document.getElementById("vcards").classList.toggle("on",view=="cards");document.getElementById("vtable").classList.toggle("on",view=="table")}
+async function load(){const j=await (await fetch("/data.json?_="+Date.now())).json();DATA=j.tokens;document.getElementById("n").textContent=DATA.length;const tbn=DATA.reduce((s,x)=>s+(x.benef||0),0),tw=DATA.reduce((s,x)=>s+(x.wallets||0),0);const e=document.getElementById("tbn");e.textContent=(tbn>=0?"+":"")+tbn.toFixed(1);e.className=tbn>=0?"pos":"neg";document.getElementById("tw").textContent=tw;document.getElementById("upd").textContent="Maj il y a "+ago(j.updated);render()}
 document.querySelectorAll("th[data-k]").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(sortK==k)asc=!asc;else{sortK=k;asc=(k=="sym")}render()});
 document.getElementById("q").oninput=render;
+document.getElementById("vcards").onclick=()=>{view="cards";localStorage.setItem("vmview",view);render()};
+document.getElementById("vtable").onclick=()=>{view="table";localStorage.setItem("vmview",view);render()};
 load();setInterval(load,60000);
-</script></body></html>"""
-
-TOKEN_PAGE = """<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Analyse wallet dev</title>
-<style>body{margin:0;background:#0b0e14;color:#e6e9ef;font-family:-apple-system,Segoe UI,sans-serif;font-size:14px;padding:20px}
-table{border-collapse:collapse;width:100%;margin-top:12px}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #1c222e;font-size:12px}
-.pos{color:#3ddc84}.neg{color:#ff5c5c}.mut{color:#8b94a7}code{font-family:ui-monospace,monospace}
-.bar{background:#131825;border:1px solid #1c222e;border-radius:8px;padding:10px 14px;margin:8px 0;display:inline-block;margin-right:10px}</style>
-</head><body>
-<h2>Analyse wallets dev</h2><div id="st" class="mut">Chargement…</div>
-<div id="sum"></div><div id="wrap"></div>
-<script>
-const ca=new URLSearchParams(location.search).get("ca");
-document.title="Analyse "+ca;
-async function poll(){
- const j=await (await fetch("/detection?ca="+ca)).json();
- const st=document.getElementById("st");
- if(j.state==="idle"){await fetch("/analyze?ca="+ca);st.textContent="Analyse lancée…";return setTimeout(poll,2000);}
- if(j.state==="pending"||j.state==="running"){st.textContent="Analyse en cours ("+j.state+")…";return setTimeout(poll,2000);}
- if(j.state==="error"){st.textContent="";const lbl=document.createElement("span");lbl.className="neg";lbl.textContent="Erreur";const code=document.createElement("code");code.textContent=(j.error||"").slice(0,300);st.appendChild(lbl);st.appendChild(document.createTextNode(": "));st.appendChild(code);return;}
- const r=j.result;st.textContent="Vortex: "+(r.is_vortex?"oui":"non")+" · creator ";const cc=document.createElement("code");cc.textContent=(r.creator||"?");st.appendChild(cc);st.appendChild(document.createTextNode(" · participants "+r.participants));if(r.partial){const pp=document.createElement("span");pp.className="neg";pp.textContent=" · partiel";st.appendChild(pp);}
- const c=r.confidence;
- document.getElementById("sum").innerHTML=
-  "<div class='bar'><b>"+c.n_detected+"</b>"+(c.n_oracle?" / "+c.n_oracle:"")+" wallets</div>"+
-  "<div class='bar'>buy "+c.buy_detected+(c.buy_oracle?" / "+c.buy_oracle+" ("+Math.round((c.buy_cov||0)*100)+"%)":"")+"</div>"+
-  "<div class='bar'>sell "+c.sell_detected+(c.sell_oracle?" / "+c.sell_oracle+" ("+Math.round((c.sell_cov||0)*100)+"%)":"")+"</div>";
- const wrap=document.getElementById("wrap");wrap.innerHTML="";
- const tbl=document.createElement("table");
- tbl.innerHTML="<thead><tr><th>wallet</th><th>score</th><th>buy</th><th>sell</th><th>solde</th><th>tx</th><th>autres</th><th>preuves</th><th>funder</th></tr></thead>";
- const tbody=document.createElement("tbody");
- r.dev_wallets.forEach(w=>{
-  const tr=document.createElement("tr");
-  const addr=document.createElement("td");const ac=document.createElement("code");ac.textContent=w.address;addr.appendChild(ac);tr.appendChild(addr);
-  [w.dev_score,w.buy,w.sell,w.balance,w.n_tx,w.n_other_mints].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td);});
-  const reasons=document.createElement("td");reasons.className="mut";reasons.textContent=(w.reasons||[]).join(", ");tr.appendChild(reasons);
-  const fn=document.createElement("td");fn.className="mut";const fc=document.createElement("code");fc.textContent=(w.funder||"-").slice(0,8);fn.appendChild(fc);tr.appendChild(fn);
-  tbody.appendChild(tr);
- });
- tbl.appendChild(tbody);wrap.appendChild(tbl);
-}
-poll();
 </script></body></html>"""
 
 class H(BaseHTTPRequestHandler):
@@ -359,26 +350,6 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(body)
         elif path in ("/health", "/healthz"):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-        elif path == "/analyze":
-            ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
-            if not _valid_ca(ca):
-                body = json.dumps({"state": "error", "error": "invalid ca"}, ensure_ascii=False).encode()
-                self.send_response(400); self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers(); self.wfile.write(body); return
-            st = JOBS.submit(ca)
-            body = json.dumps(st, ensure_ascii=False).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers(); self.wfile.write(body)
-        elif path == "/detection":
-            ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
-            st = JOBS.status(ca) if _valid_ca(ca) else {"state": "idle", "result": None, "error": None}
-            body = json.dumps(st, ensure_ascii=False).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(body)
-        elif path == "/token":
-            b = TOKEN_PAGE.encode()
-            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers(); self.wfile.write(b)
         else:
             b = PAGE.encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -387,6 +358,5 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     load_state()
     threading.Thread(target=poller, daemon=True).start()
-    JOBS.start()
     log(f"web sur :{PORT}  (poll {POLL_MIN}-{POLL_MIN+POLL_JITTER}s, proxy={'oui' if PROXY else 'non'})")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
