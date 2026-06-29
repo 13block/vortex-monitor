@@ -2,7 +2,20 @@
 # Vortex Deployer - monitor de nouveaux launches (stdlib only).
 # Poll le sitemap (10-15 min, jitter) -> diff -> scrape -> Discord, et sert une page web auto-actualisee.
 import os, re, json, time, random, threading, urllib.request, urllib.error, ssl
+from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import asdict
+from detector.helius import Helius
+from detector.pumpfun import PumpFun
+from detector.registry import Registry
+from detector.detector import analyze_token
+from detector.jobs import JobQueue
+from detector.cache import JsonCache
+
+import re as _re
+_CA_RE = _re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+def _valid_ca(ca):
+    return bool(ca and _CA_RE.match(ca))
 
 # ---------- Config (variables d'environnement) ----------
 PORT         = int(os.environ.get("PORT", "8080"))
@@ -37,6 +50,25 @@ LOCK = threading.Lock()
 RECORDS = {}            # ca -> dict
 LAST_CHECK = 0
 BASELINE_DONE = False
+
+HELIUS_KEY = os.environ.get("HELIUS_KEY", "")
+_helius = Helius(HELIUS_KEY)
+_pump = PumpFun()
+_registry = Registry(os.path.join(DATA_DIR, "registry.json"))
+_launch_cache = JsonCache(os.path.join(DATA_DIR, "launch_cache.json"))
+_detections = JsonCache(os.path.join(DATA_DIR, "detections.json"))
+
+def _run_detection(ca):
+    with LOCK:
+        oracle = RECORDS.get(ca)
+    res = analyze_token(ca, oracle, _helius, _pump, _registry, cache=_launch_cache)
+    _registry.save()
+    d = asdict(res)
+    _detections.set(ca, d)
+    _detections.save()
+    return d
+
+JOBS = JobQueue(_run_detection)
 
 def log(*a): print(time.strftime("%H:%M:%S"), *a, flush=True)
 
@@ -225,7 +257,7 @@ function render(){
   <td class="num">${fmtD(x.date)}</td><td class="num">${x.buy.toFixed(2)}</td>
   <td class="num">${x.sell.toFixed(2)}</td><td class="num ${bc}">${sg}${x.benef.toFixed(2)}</td>
   <td class="num">${x.wallets}</td>
-  <td class="l"><a class="gm" href="https://gmgn.ai/sol/token/${x.ca}" target="_blank">gmgn</a></td></tr>`}).join("");
+  <td class="l"><a class="gm" href="https://gmgn.ai/sol/token/${x.ca}" target="_blank">gmgn</a> <a class="gm" href="/token?ca=${x.ca}" target="_blank">analyser</a></td></tr>`}).join("");
  document.querySelectorAll("th[data-k]").forEach(th=>{th.querySelector(".arrow")?.remove();if(th.dataset.k==sortK){const s=document.createElement("span");s.className="arrow";s.textContent=asc?"▲":"▼";th.appendChild(s)}});
 }
 async function load(){
@@ -243,17 +275,79 @@ document.getElementById("q").oninput=render;
 load();setInterval(load,60000);
 </script></body></html>"""
 
+TOKEN_PAGE = """<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Analyse wallet dev</title>
+<style>body{margin:0;background:#0b0e14;color:#e6e9ef;font-family:-apple-system,Segoe UI,sans-serif;font-size:14px;padding:20px}
+table{border-collapse:collapse;width:100%;margin-top:12px}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #1c222e;font-size:12px}
+.pos{color:#3ddc84}.neg{color:#ff5c5c}.mut{color:#8b94a7}code{font-family:ui-monospace,monospace}
+.bar{background:#131825;border:1px solid #1c222e;border-radius:8px;padding:10px 14px;margin:8px 0;display:inline-block;margin-right:10px}</style>
+</head><body>
+<h2>Analyse wallets dev</h2><div id="st" class="mut">Chargement…</div>
+<div id="sum"></div><div id="wrap"></div>
+<script>
+const ca=new URLSearchParams(location.search).get("ca");
+document.title="Analyse "+ca;
+async function poll(){
+ const j=await (await fetch("/detection?ca="+ca)).json();
+ const st=document.getElementById("st");
+ if(j.state==="idle"){await fetch("/analyze?ca="+ca);st.textContent="Analyse lancée…";return setTimeout(poll,2000);}
+ if(j.state==="pending"||j.state==="running"){st.textContent="Analyse en cours ("+j.state+")…";return setTimeout(poll,2000);}
+ if(j.state==="error"){st.textContent="";const lbl=document.createElement("span");lbl.className="neg";lbl.textContent="Erreur";const code=document.createElement("code");code.textContent=(j.error||"").slice(0,300);st.appendChild(lbl);st.appendChild(document.createTextNode(": "));st.appendChild(code);return;}
+ const r=j.result;st.textContent="Vortex: "+(r.is_vortex?"oui":"non")+" · creator ";const cc=document.createElement("code");cc.textContent=(r.creator||"?");st.appendChild(cc);st.appendChild(document.createTextNode(" · participants "+r.participants));if(r.partial){const pp=document.createElement("span");pp.className="neg";pp.textContent=" · partiel";st.appendChild(pp);}
+ const c=r.confidence;
+ document.getElementById("sum").innerHTML=
+  "<div class='bar'><b>"+c.n_detected+"</b>"+(c.n_oracle?" / "+c.n_oracle:"")+" wallets</div>"+
+  "<div class='bar'>buy "+c.buy_detected+(c.buy_oracle?" / "+c.buy_oracle+" ("+Math.round((c.buy_cov||0)*100)+"%)":"")+"</div>"+
+  "<div class='bar'>sell "+c.sell_detected+(c.sell_oracle?" / "+c.sell_oracle+" ("+Math.round((c.sell_cov||0)*100)+"%)":"")+"</div>";
+ const wrap=document.getElementById("wrap");wrap.innerHTML="";
+ const tbl=document.createElement("table");
+ tbl.innerHTML="<thead><tr><th>wallet</th><th>score</th><th>buy</th><th>sell</th><th>solde</th><th>tx</th><th>autres</th><th>preuves</th><th>funder</th></tr></thead>";
+ const tbody=document.createElement("tbody");
+ r.dev_wallets.forEach(w=>{
+  const tr=document.createElement("tr");
+  const addr=document.createElement("td");const ac=document.createElement("code");ac.textContent=w.address;addr.appendChild(ac);tr.appendChild(addr);
+  [w.dev_score,w.buy,w.sell,w.balance,w.n_tx,w.n_other_mints].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td);});
+  const reasons=document.createElement("td");reasons.className="mut";reasons.textContent=(w.reasons||[]).join(", ");tr.appendChild(reasons);
+  const fn=document.createElement("td");fn.className="mut";const fc=document.createElement("code");fc.textContent=(w.funder||"-").slice(0,8);fn.appendChild(fc);tr.appendChild(fn);
+  tbody.appendChild(tr);
+ });
+ tbl.appendChild(tbody);wrap.appendChild(tbl);
+}
+poll();
+</script></body></html>"""
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        if self.path.startswith("/data.json"):
+        path = urlparse(self.path).path
+        if path == "/data.json":
             with LOCK:
                 toks = sorted(RECORDS.values(), key=lambda x: x.get("date", 0), reverse=True)
                 body = json.dumps({"updated": LAST_CHECK, "tokens": toks}, ensure_ascii=False).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(body)
-        elif self.path in ("/health", "/healthz"):
+        elif path in ("/health", "/healthz"):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        elif path == "/analyze":
+            ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
+            if not _valid_ca(ca):
+                body = json.dumps({"state": "error", "error": "invalid ca"}, ensure_ascii=False).encode()
+                self.send_response(400); self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers(); self.wfile.write(body); return
+            st = JOBS.submit(ca)
+            body = json.dumps(st, ensure_ascii=False).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers(); self.wfile.write(body)
+        elif path == "/detection":
+            ca = parse_qs(urlparse(self.path).query).get("ca", [""])[0]
+            st = JOBS.status(ca) if _valid_ca(ca) else {"state": "idle", "result": None, "error": None}
+            body = json.dumps(st, ensure_ascii=False).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(body)
+        elif path == "/token":
+            b = TOKEN_PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers(); self.wfile.write(b)
         else:
             b = PAGE.encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -262,5 +356,6 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     load_state()
     threading.Thread(target=poller, daemon=True).start()
+    JOBS.start()
     log(f"web sur :{PORT}  (poll {POLL_MIN}-{POLL_MIN+POLL_JITTER}s, proxy={'oui' if PROXY else 'non'})")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
