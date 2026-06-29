@@ -115,22 +115,53 @@ def scrape_token(ca):
             "date": dms, "buy": round(buy, 3), "sell": round(sell, 3),
             "benef": round(sell - buy, 3), "wallets": int(num(mw.group(1))) if mw else 0}
 
+def fmt_usd(v):
+    if v is None: return None
+    v = float(v)
+    if v >= 1e6: return f"${v/1e6:.2f}M"
+    if v >= 1e3: return f"${v/1e3:.1f}K"
+    return f"${v:.0f}"
+
+def pump_meta(ca):
+    # Best-effort enrichment from pump.fun: name, avatar, socials, ATH market cap (USD).
+    try:
+        c = _pump.coins(ca) or {}
+    except Exception as e:
+        log("pump meta err", e); return {}
+    socials = []
+    for label, key in (("site", "website"), ("X", "twitter"), ("TG", "telegram")):
+        u = c.get(key)
+        if u and isinstance(u, str) and u.startswith("http"):
+            socials.append(f"[{label}]({u})")
+    return {"name": c.get("name"), "sym": c.get("symbol"),
+            "image": (c.get("image_uri") or None), "ath": c.get("ath_market_cap"),
+            "socials": "  ".join(socials)}
+
 def post_discord(d):
     if not WEBHOOKS: return
     color = 0x3ddc84 if d["benef"] > 0 else (0xff5c5c if d["benef"] < 0 else 0x8b94a7)
     ca = d["ca"]
-    payload = {"username": "Vortex Monitor", "embeds": [{
-        "title": f"Nouveau launch : ${d['sym']}" + (f" - {d['name']}" if d['name'] else ""),
-        "url": f"https://gmgn.ai/sol/token/{ca}", "color": color,
-        "fields": [
-            {"name": "Buy", "value": f"{d['buy']:.2f} SOL", "inline": True},
-            {"name": "Sell", "value": f"{d['sell']:.2f} SOL", "inline": True},
-            {"name": "Benef", "value": f"{'+' if d['benef']>0 else ''}{d['benef']:.2f} SOL", "inline": True},
-            {"name": "Wallets", "value": str(d["wallets"]), "inline": True},
-            {"name": "CA", "value": f"`{ca}`", "inline": False},
-            {"name": "Liens", "value": f"[gmgn](https://gmgn.ai/sol/token/{ca}) | [vortex]({SITE}/token/{ca})", "inline": False},
-        ],
-        "timestamp": __import__("datetime").datetime.fromtimestamp(d["date"]/1000, __import__("datetime").timezone.utc).isoformat()}]}
+    m = pump_meta(ca)
+    name = m.get("name") or d.get("name") or ""
+    sym = m.get("sym") or d.get("sym") or "?"
+    fields = [
+        {"name": "Buy", "value": f"{d['buy']:.2f} SOL", "inline": True},
+        {"name": "Sell", "value": f"{d['sell']:.2f} SOL", "inline": True},
+        {"name": "Benef", "value": f"{'+' if d['benef']>0 else ''}{d['benef']:.2f} SOL", "inline": True},
+        {"name": "Wallets", "value": str(d["wallets"]), "inline": True},
+    ]
+    ath = fmt_usd(m.get("ath"))
+    if ath: fields.append({"name": "ATH MC", "value": ath, "inline": True})
+    fields.append({"name": "CA", "value": f"`{ca}`", "inline": False})
+    fields.append({"name": "Liens", "value": f"[gmgn](https://gmgn.ai/sol/token/{ca}) | [vortex]({SITE}/token/{ca})", "inline": False})
+    if m.get("socials"):
+        fields.append({"name": "Socials", "value": m["socials"], "inline": False})
+    embed = {
+        "title": (f"{name} — ${sym}" if name else f"${sym}"),
+        "url": f"https://gmgn.ai/sol/token/{ca}", "color": color, "fields": fields,
+        "timestamp": __import__("datetime").datetime.fromtimestamp(d["date"]/1000, __import__("datetime").timezone.utc).isoformat()}
+    if m.get("image"): embed["thumbnail"] = {"url": m["image"]}
+    payload = {"username": "Vortex Monitor", "embeds": [embed]}
     data = json.dumps(payload).encode()
     for wh in WEBHOOKS:
         try:
