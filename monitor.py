@@ -129,13 +129,13 @@ def pump_meta(ca):
     except Exception as e:
         log("pump meta err", e); return {}
     socials = []
-    for label, key in (("site", "website"), ("X", "twitter"), ("TG", "telegram")):
+    for label, key in (("Website", "website"), ("Twitter", "twitter"), ("Telegram", "telegram")):
         u = c.get(key)
         if u and isinstance(u, str) and u.startswith("http"):
             socials.append(f"[{label}]({u})")
     return {"name": c.get("name"), "sym": c.get("symbol"),
             "image": (c.get("image_uri") or None), "ath": c.get("ath_market_cap"),
-            "socials": "  ".join(socials)}
+            "socials": " · ".join(socials)}
 
 def post_discord(d):
     if not WEBHOOKS: return
@@ -153,9 +153,9 @@ def post_discord(d):
     ath = fmt_usd(m.get("ath"))
     if ath: fields.append({"name": "ATH MC", "value": ath, "inline": True})
     fields.append({"name": "CA", "value": f"`{ca}`", "inline": False})
-    fields.append({"name": "Liens", "value": f"[gmgn](https://gmgn.ai/sol/token/{ca}) | [vortex]({SITE}/token/{ca})", "inline": False})
     if m.get("socials"):
         fields.append({"name": "Socials", "value": m["socials"], "inline": False})
+    fields.append({"name": "Liens", "value": f"[gmgn](https://gmgn.ai/sol/token/{ca}) | [vortex]({SITE}/token/{ca})", "inline": False})
     embed = {
         "title": (f"{name} — ${sym}" if name else f"${sym}"),
         "url": f"https://gmgn.ai/sol/token/{ca}", "color": color, "fields": fields,
