@@ -17,6 +17,7 @@ DATA_DIR     = os.environ.get("DATA_DIR", "/data")
 PROXY        = os.environ.get("PROXY", "").strip()         # ex: http://user:pass@host:port (optionnel)
 REFRESH_HOURS = int(os.environ.get("REFRESH_HOURS", "24")) # re-scrape les tokens plus jeunes que X h (0 = jamais)
 REFRESH_MAX   = int(os.environ.get("REFRESH_MAX", "60"))   # nb max de tokens rafraichis par cycle
+BACKFILL_MAX  = int(os.environ.get("BACKFILL_MAX", "200"))  # nb max d'enrichissements pump (avatar/ATH/socials) par cycle
 SITE         = "https://www.vortexdeployer.com"
 
 STATE = os.path.join(DATA_DIR, "records.json")
@@ -194,7 +195,7 @@ def poll_once():
         BASELINE_DONE = True
         log("baseline etablie (silencieuse):", len(RECORDS))
     refresh_recent()
-    backfill_meta()
+    backfill_meta(BACKFILL_MAX)
     LAST_CHECK = int(time.time() * 1000)
 
 def backfill_meta(limit=25):
@@ -210,7 +211,7 @@ def backfill_meta(limit=25):
             if ca in RECORDS:
                 RECORDS[ca].update({k: rec.get(k) for k in ("image", "ath", "website", "twitter", "telegram", "meta")})
                 n += 1
-        time.sleep(0.2)
+        time.sleep(0.1)
     if n:
         with LOCK: save_state()
         log(f"backfill meta: {n}/{len(todo)}")
